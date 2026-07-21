@@ -2254,6 +2254,7 @@ window.addEventListener('beforeunload',()=>{
 const db=getFirestore(app);
 const storage=fbStorage(app);
 const ADMIN='oladejiridwanopeyemi@gmail.com';
+function isAdminEmail(e){return(e||'').trim().toLowerCase()===ADMIN.toLowerCase();}
 
 window._s={user:null,userData:null,isAdmin:false,balHidden:false,navHist:[],pendingData:null,selProv:{},selPlan:null,allTx:[],allUsers:[],allFundReqs:[],proofFile:null,proofDataURL:null,fundStep:1,adminPINVerified:false};
 
@@ -2298,7 +2299,7 @@ window.navigateTo=(id)=>{
   if(id==='rechargeScreen')initRechargeScreen();
   if(id==='adminRechargeRequests')loadAdminRechargeRequests();
   if(id==='adminSubAdmins'){
-    if(_s.user?.email!==ADMIN){showToast('error','Only the super admin can manage sub admins');goBack();}
+    if(!isAdminEmail(_s.user?.email)){showToast('error','Only the super admin can manage sub admins');goBack();}
     else loadSubAdminsList();
   }
   if(id==='supportChatScreen')initSupportChat();
@@ -2372,7 +2373,7 @@ window.handleRegister=async()=>{
     const cred=await createUserWithEmailAndPassword(auth,email,pw);
     await updateProfile(cred.user,{displayName:`${first} ${last}`});
     const rc='KBR'+genId(5),an='9'+Math.floor(Math.random()*900000000+100000000);
-    await setDoc(doc(db,'users',cred.user.uid),{uid:cred.user.uid,firstName:first,lastName:last,email,phone,country,role:email===ADMIN?'admin':'user',balance:0,totalFunded:0,totalSpent:0,pendingBalance:0,bonus:0,referralCode:rc,referredBy:ref||'',referralCount:0,referralEarned:0,accountNumber:an,agentLevel:'standard',agentCommission:0,isActive:true,kycVerified:false,transactionPIN:pin,photoURL:photo,registrationComplete:true,createdAt:serverTimestamp(),lastSeen:serverTimestamp()});
+    await setDoc(doc(db,'users',cred.user.uid),{uid:cred.user.uid,firstName:first,lastName:last,email,phone,country,role:isAdminEmail(email)?'admin':'user',balance:0,totalFunded:0,totalSpent:0,pendingBalance:0,bonus:0,referralCode:rc,referredBy:ref||'',referralCount:0,referralEarned:0,accountNumber:an,agentLevel:'standard',agentCommission:0,isActive:true,kycVerified:false,transactionPIN:pin,photoURL:photo,registrationComplete:true,createdAt:serverTimestamp(),lastSeen:serverTimestamp()});
     if(ref){const rq=query(collection(db,'users'),where('referralCode','==',ref));const rs=await getDocs(rq);if(!rs.empty){await updateDoc(doc(db,'users',rs.docs[0].id),{balance:increment(500),referralCount:increment(1),referralEarned:increment(500)});await updateDoc(doc(db,'users',cred.user.uid),{balance:increment(200)})}}
     await addNotif(cred.user.uid,'🎉 Welcome to KOBOrush!',`Hi ${first}! Your account is ready.`,'success');
     _s.pendingRegPhoto=null;
@@ -2864,7 +2865,7 @@ onAuthStateChanged(auth,async(user)=>{
       if(!existingDoc.exists()){
         const[fn,...rest]=(user.displayName||'User').split(' ');
         const rc='KBR'+genId(5),an='9'+Math.floor(Math.random()*900000000+100000000);
-        await setDoc(doc(db,'users',user.uid),{uid:user.uid,firstName:fn,lastName:rest.join(' ')||'',email:user.email,phone:'',country:'NG',role:user.email===ADMIN?'admin':'user',balance:0,totalFunded:0,totalSpent:0,pendingBalance:0,bonus:0,referralCode:rc,referredBy:'',referralCount:0,referralEarned:0,accountNumber:an,agentLevel:'standard',agentCommission:0,isActive:true,kycVerified:false,transactionPIN:'',photoURL:'',registrationComplete:false,createdAt:serverTimestamp(),lastSeen:serverTimestamp()});
+        await setDoc(doc(db,'users',user.uid),{uid:user.uid,firstName:fn,lastName:rest.join(' ')||'',email:user.email,phone:'',country:'NG',role:isAdminEmail(user.email)?'admin':'user',balance:0,totalFunded:0,totalSpent:0,pendingBalance:0,bonus:0,referralCode:rc,referredBy:'',referralCount:0,referralEarned:0,accountNumber:an,agentLevel:'standard',agentCommission:0,isActive:true,kycVerified:false,transactionPIN:'',photoURL:'',registrationComplete:false,createdAt:serverTimestamp(),lastSeen:serverTimestamp()});
       }
       await loadUD(user.uid);
       document.getElementById('bottomNav').style.display='flex';
@@ -2895,7 +2896,7 @@ onAuthStateChanged(auth,async(user)=>{
 });
 
 // USER DATA
-async function loadUD(uid){const s=await getDoc(doc(db,'users',uid));if(s.exists()){_s.userData=s.data();_s.isAdmin=_s.userData.role==='admin'||_s.user?.email===ADMIN;if(_s.isAdmin&&_s.userData.role!=='admin')await updateDoc(doc(db,'users',uid),{role:'admin'})}}
+async function loadUD(uid){const s=await getDoc(doc(db,'users',uid));if(s.exists()){_s.userData=s.data();_s.isAdmin=_s.userData.role==='admin'||isAdminEmail(_s.user?.email);if(_s.isAdmin&&_s.userData.role!=='admin')await updateDoc(doc(db,'users',uid),{role:'admin'})}}
 function listenUD(uid){onSnapshot(doc(db,'users',uid),(s)=>{if(s.exists()){_s.userData=s.data();updateUI()}})}
 function updateUI(){
   const d=_s.userData;if(!d)return;
@@ -5550,10 +5551,10 @@ function txSourceLabel(t){
 
 // ── Sub Admin management (super admin only — gated both in the UI nav and here) ──
 window.addSubAdmin=async()=>{
-  if(_s.user?.email!==ADMIN)return showToast('error','Only the super admin can add sub admins');
+  if(!isAdminEmail(_s.user?.email))return showToast('error','Only the super admin can add sub admins');
   const email=document.getElementById('newSubAdminEmail').value.trim().toLowerCase();
   if(!email)return showToast('error','Enter an email address');
-  if(email===ADMIN)return showToast('error','This user is already the super admin');
+  if(isAdminEmail(email))return showToast('error','This user is already the super admin');
   setBtnLoading('addSubAdminBtn',true,'Grant Admin Access');
   try{
     const q=query(collection(db,'users'),where('email','==',email));
@@ -5571,7 +5572,7 @@ window.addSubAdmin=async()=>{
   setBtnLoading('addSubAdminBtn',false,'Grant Admin Access');
 };
 window.removeSubAdmin=async(uid,name)=>{
-  if(_s.user?.email!==ADMIN)return showToast('error','Only the super admin can remove sub admins');
+  if(!isAdminEmail(_s.user?.email))return showToast('error','Only the super admin can remove sub admins');
   if(!confirm(`Remove admin access from ${name}? They will become a regular user.`))return;
   try{
     await updateDoc(doc(db,'users',uid),{role:'user',isSubAdmin:false});
@@ -5587,7 +5588,7 @@ async function loadSubAdminsList(){
   try{
     const q=query(collection(db,'users'),where('role','==','admin'));
     const snap=await getDocs(q);
-    const subAdmins=snap.docs.filter(d=>d.data().email!==ADMIN);
+    const subAdmins=snap.docs.filter(d=>!isAdminEmail(d.data().email));
     if(subAdmins.length===0){el.innerHTML='<p style="font-size:12.5px;color:var(--text3);text-align:center;padding:20px 0">No sub admins yet</p>';return;}
     el.innerHTML=subAdmins.map(d=>{
       const u=d.data();
@@ -5620,7 +5621,7 @@ async function loadAdminDash(){
     us.docs.forEach(d=>{if(d.data().agentLevel&&d.data().agentLevel!=='standard')ag++});
     document.getElementById('adminUserCount').textContent=us.size;document.getElementById('adminRevenue').textContent='₦'+rev.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});document.getElementById('adminTxCount').textContent=ts.size;document.getElementById('adminAgentCount').textContent=ag;
     document.getElementById('adminGreeting').textContent=`Welcome back, ${_s.userData?.firstName||'Admin'}`;
-    const subAdminCard=document.getElementById('subAdminNavCard');if(subAdminCard)subAdminCard.style.display=(_s.user?.email===ADMIN)?'block':'none';
+    const subAdminCard=document.getElementById('subAdminNavCard');if(subAdminCard)subAdminCard.style.display=isAdminEmail(_s.user?.email)?'block':'none';
     document.getElementById('adminUsersList').innerHTML=us.docs.slice(-5).reverse().map(d=>{const u=d.data();return`<div class="user-row"><div class="avatar" style="width:30px;height:30px;font-size:11px">${(u.firstName?.[0]||'?')+(u.lastName?.[0]||'')}</div><div class="user-row-info"><div class="user-row-name">${u.firstName||''} ${u.lastName||''}</div><div class="user-row-meta">${u.email}</div></div><span class="badge badge-${u.isActive?'success':'failed'}">${u.isActive?'Active':'Banned'}</span></div>`}).join('');
     document.getElementById('adminAPIStatus').innerHTML=[{name:'ClubKonnect VTU',on:true},{name:'Paystack',on:true},{name:'Manual Funding',on:true}].map(a=>`<div class="admin-table-row"><div class="tx-icon" style="background:${a.on?'#E0FDF4':'#FEF2F2'}">🔌</div><div class="row-main"><div class="row-title">${a.name}</div></div><span class="badge badge-${a.on?'success':'failed'}">${a.on?'Active':'Off'}</span></div>`).join('');
     document.getElementById('adminServiceControls').innerHTML=['Airtime','Data Bundle','Electricity','Cable TV','School PIN','Transfer'].map(s=>`<div class="admin-table-row"><div class="row-main"><div class="row-title">${s}</div></div><label class="toggle-switch"><input type="checkbox" checked onchange="toggleSvc('${s}',this.checked)"><div class="toggle-slider"></div></label></div>`).join('');
