@@ -2396,20 +2396,36 @@ function _isInAppBrowser(){
   const ua=navigator.userAgent||'';
   return /FBAN|FBAV|Instagram|Line\/|WhatsApp|Messenger|TikTok|MicroMessenger/i.test(ua);
 }
-window.handleGoogleAuth=async()=>{
+window.handleGoogleAuth=async(retry)=>{
   if(_isInAppBrowser()){
     showToast('error','Google sign-in is blocked inside this app\'s browser. Tap the ⋮ menu and choose "Open in Chrome/Browser", then try again.');
     return;
   }
+  if(window._gAuthBusy)return; // ignore double-taps while a request is already in flight
   window._gAuthBusy=true;
+  const btns=document.querySelectorAll('.social-btn-row[onclick*="handleGoogleAuth"]');
+  btns.forEach(b=>{b.style.opacity='.6';b.style.pointerEvents='none'});
+  if(!retry)showToast('info','Connecting to Google…');
+  // Guard against the request hanging forever on a bad connection (common
+  // on unstable mobile data like Glo) — surface a clear message instead of
+  // leaving the button stuck.
+  const timeoutMs=20000;
+  let timedOut=false;
+  const timeoutId=setTimeout(()=>{timedOut=true;window._gAuthBusy=false;btns.forEach(b=>{b.style.opacity='';b.style.pointerEvents=''});showToast('error','Google sign-in timed out — your connection may be too slow or unstable right now. Please try again.');},timeoutMs);
   try{
     // Popup is far more reliable than a full-page redirect on mobile
     // (survives flaky connections, doesn't depend on the browser keeping
     // IndexedDB state across a full navigation away and back).
     const result=await signInWithPopup(auth,new GoogleAuthProvider());
+    clearTimeout(timeoutId);
+    window._gAuthBusy=false;
+    btns.forEach(b=>{b.style.opacity='';b.style.pointerEvents=''});
     // onAuthStateChanged below picks up result.user and navigates to home.
   }catch(e){
+    clearTimeout(timeoutId);
+    if(timedOut)return; // timeout message already shown above
     window._gAuthBusy=false;
+    btns.forEach(b=>{b.style.opacity='';b.style.pointerEvents=''});
     if(e.code==='auth/popup-blocked'||e.code==='auth/operation-not-supported-in-this-environment'){
       // Fall back to redirect if the popup itself was blocked by the browser.
       try{await signInWithRedirect(auth,new GoogleAuthProvider());}
@@ -2419,6 +2435,18 @@ window.handleGoogleAuth=async()=>{
     if(e.code==='auth/popup-closed-by-user'||e.code==='auth/cancelled-popup-request'){return;} // user closed it, no error needed
     if(e.code==='auth/unauthorized-domain'){
       showToast('error','This site\'s domain isn\'t authorized for Google sign-in yet. Add it in Firebase Console → Authentication → Settings → Authorized domains.');
+      return;
+    }
+    // Dropped/failed request mid-flight — very common on unstable mobile
+    // data (e.g. Glo) where the connection stalls partway through talking
+    // to Google's servers. Auto-retry once before bothering the user.
+    if(e.code==='auth/network-request-failed'||e.code==='auth/internal-error'||e.code==='auth/timeout'){
+      if(!retry){
+        showToast('info','Connection dropped, retrying…');
+        setTimeout(()=>window.handleGoogleAuth(true),1200);
+        return;
+      }
+      showToast('error','Your network connection kept dropping mid sign-in. Try switching to WiFi or a different network, then try again.');
       return;
     }
     showToast('error',e.message);
