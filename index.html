@@ -2215,11 +2215,12 @@ window.addEventListener('error', function(e) {
   }
 });
 import{initializeApp}from'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import{getAuth,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,onAuthStateChanged,sendPasswordResetEmail,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,updateProfile,browserSessionPersistence,setPersistence}from'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+import{getAuth,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,onAuthStateChanged,sendPasswordResetEmail,GoogleAuthProvider,signInWithCredential,signInWithPopup,signInWithRedirect,getRedirectResult,updateProfile,browserSessionPersistence,setPersistence}from'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import{getFirestore,doc,setDoc,getDoc,updateDoc,collection,addDoc,query,where,orderBy,limit,getDocs,onSnapshot,serverTimestamp,increment,runTransaction,deleteDoc}from'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 import{getStorage as fbStorage,ref as storageRef,uploadString,getDownloadURL}from'https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js';
 
 const FC={apiKey:"AIzaSyBPssL1UIKWUgrFZIHqR8cCdOaFabK23hY",authDomain:"koborush-a9777.firebaseapp.com",projectId:"koborush-a9777",storageBucket:"koborush-a9777.firebasestorage.app",messagingSenderId:"377849970905",appId:"1:377849970905:web:645f35e338375c7b3bfec8"};
+const GOOGLE_CLIENT_ID='377849970905-51lovsjvqe6vrs2fdb760ncdk97sm98l.apps.googleusercontent.com';
 const app=initializeApp(FC);
 const auth=getAuth(app);
 // ── SESSION SECURITY: force session-only persistence (no auto login after browser close) ──
@@ -2396,6 +2397,24 @@ function _isInAppBrowser(){
   const ua=navigator.userAgent||'';
   return /FBAN|FBAV|Instagram|Line\/|WhatsApp|Messenger|TikTok|MicroMessenger/i.test(ua);
 }
+let _gisLoadPromise=null;
+function loadGIS(){
+  if(window.google?.accounts?.oauth2)return Promise.resolve();
+  if(_gisLoadPromise)return _gisLoadPromise;
+  _gisLoadPromise=new Promise((res,rej)=>{
+    const s=document.createElement('script');
+    s.src='https://accounts.google.com/gsi/client';
+    s.async=true;s.defer=true;
+    s.onload=()=>window.google?.accounts?.oauth2?res():rej(new Error('Google script loaded but did not initialize'));
+    s.onerror=()=>rej(new Error('Could not reach Google — check your internet connection'));
+    document.head.appendChild(s);
+  });
+  return _gisLoadPromise;
+}
+function _setGBtnBusy(busy){
+  const btns=document.querySelectorAll('.social-btn-row[onclick*="handleGoogleAuth"]');
+  btns.forEach(b=>{b.style.opacity=busy?'.6':'';b.style.pointerEvents=busy?'none':''});
+}
 window.handleGoogleAuth=async(retry)=>{
   if(_isInAppBrowser()){
     showToast('error','Google sign-in is blocked inside this app\'s browser. Tap the ⋮ menu and choose "Open in Chrome/Browser", then try again.');
@@ -2403,53 +2422,74 @@ window.handleGoogleAuth=async(retry)=>{
   }
   if(window._gAuthBusy)return; // ignore double-taps while a request is already in flight
   window._gAuthBusy=true;
-  const btns=document.querySelectorAll('.social-btn-row[onclick*="handleGoogleAuth"]');
-  btns.forEach(b=>{b.style.opacity='.6';b.style.pointerEvents='none'});
+  _setGBtnBusy(true);
   if(!retry)showToast('info','Connecting to Google…');
-  // Guard against the request hanging forever on a bad connection (common
-  // on unstable mobile data like Glo) — surface a clear message instead of
-  // leaving the button stuck.
   const timeoutMs=20000;
   let timedOut=false;
-  const timeoutId=setTimeout(()=>{timedOut=true;window._gAuthBusy=false;btns.forEach(b=>{b.style.opacity='';b.style.pointerEvents=''});showToast('error','Google sign-in timed out — your connection may be too slow or unstable right now. Please try again.');},timeoutMs);
+  const timeoutId=setTimeout(()=>{timedOut=true;window._gAuthBusy=false;_setGBtnBusy(false);showToast('error','Google sign-in timed out — your connection may be too slow or unstable right now. Please try again.');},timeoutMs);
+
+  const finishWithFallback=async()=>{
+    // Last resort: the old Firebase popup/redirect flow, in case Google's
+    // own script is unreachable for some reason.
+    try{
+      const result=await signInWithPopup(auth,new GoogleAuthProvider());
+      clearTimeout(timeoutId);window._gAuthBusy=false;_setGBtnBusy(false);
+    }catch(e){
+      clearTimeout(timeoutId);
+      if(timedOut)return;
+      window._gAuthBusy=false;_setGBtnBusy(false);
+      if(e.code==='auth/popup-blocked'||e.code==='auth/operation-not-supported-in-this-environment'){
+        try{await signInWithRedirect(auth,new GoogleAuthProvider());}catch(e2){showToast('error',e2.message);}
+        return;
+      }
+      if(e.code==='auth/popup-closed-by-user'||e.code==='auth/cancelled-popup-request')return;
+      showToast('error',e.message||'Google sign-in failed. Please try again.');
+    }
+  };
+
   try{
-    // Popup is far more reliable than a full-page redirect on mobile
-    // (survives flaky connections, doesn't depend on the browser keeping
-    // IndexedDB state across a full navigation away and back).
-    const result=await signInWithPopup(auth,new GoogleAuthProvider());
-    clearTimeout(timeoutId);
-    window._gAuthBusy=false;
-    btns.forEach(b=>{b.style.opacity='';b.style.pointerEvents=''});
-    // onAuthStateChanged below picks up result.user and navigates to home.
+    await loadGIS();
+  }catch(loadErr){
+    return finishWithFallback();
+  }
+
+  try{
+    // Google Identity Services opens its OAuth popup directly at
+    // accounts.google.com — it never touches firebaseapp.com/__/auth/handler,
+    // which is the page some networks (e.g. Glo) fail to reach over QUIC.
+    // We only get an access token here, then hand that to Firebase.
+    await new Promise((resolve,reject)=>{
+      const client=window.google.accounts.oauth2.initTokenClient({
+        client_id:GOOGLE_CLIENT_ID,
+        scope:'openid email profile',
+        callback:async(resp)=>{
+          if(resp.error){reject(new Error(resp.error_description||resp.error));return;}
+          try{
+            const credential=GoogleAuthProvider.credential(null,resp.access_token);
+            await signInWithCredential(auth,credential);
+            clearTimeout(timeoutId);window._gAuthBusy=false;_setGBtnBusy(false);
+            resolve();
+          }catch(e){reject(e);}
+        },
+        error_callback:(err)=>{reject(new Error(err?.type==='popup_closed'?'closed':(err?.message||'Google sign-in was cancelled')));}
+      });
+      client.requestAccessToken();
+    });
   }catch(e){
     clearTimeout(timeoutId);
-    if(timedOut)return; // timeout message already shown above
-    window._gAuthBusy=false;
-    btns.forEach(b=>{b.style.opacity='';b.style.pointerEvents=''});
-    if(e.code==='auth/popup-blocked'||e.code==='auth/operation-not-supported-in-this-environment'){
-      // Fall back to redirect if the popup itself was blocked by the browser.
-      try{await signInWithRedirect(auth,new GoogleAuthProvider());}
-      catch(e2){showToast('error',e2.message);}
-      return;
-    }
-    if(e.code==='auth/popup-closed-by-user'||e.code==='auth/cancelled-popup-request'){return;} // user closed it, no error needed
-    if(e.code==='auth/unauthorized-domain'){
-      showToast('error','This site\'s domain isn\'t authorized for Google sign-in yet. Add it in Firebase Console → Authentication → Settings → Authorized domains.');
-      return;
-    }
+    if(timedOut)return;
+    if(e.message==='closed'){window._gAuthBusy=false;_setGBtnBusy(false);return;} // user closed the popup, no error needed
     // Dropped/failed request mid-flight — very common on unstable mobile
     // data (e.g. Glo) where the connection stalls partway through talking
     // to Google's servers. Auto-retry once before bothering the user.
-    if(e.code==='auth/network-request-failed'||e.code==='auth/internal-error'||e.code==='auth/timeout'){
-      if(!retry){
-        showToast('info','Connection dropped, retrying…');
-        setTimeout(()=>window.handleGoogleAuth(true),1200);
-        return;
-      }
-      showToast('error','Your network connection kept dropping mid sign-in. Try switching to WiFi or a different network, then try again.');
+    if(!retry&&/network|fetch|timeout/i.test(e.message||'')){
+      window._gAuthBusy=false;_setGBtnBusy(false);
+      showToast('info','Connection dropped, retrying…');
+      setTimeout(()=>window.handleGoogleAuth(true),1200);
       return;
     }
-    showToast('error',e.message);
+    window._gAuthBusy=false;_setGBtnBusy(false);
+    showToast('error',e.message||'Google sign-in failed. Please try again.');
   }
 };
 window.handleCompleteRegPhotoChange=(input)=>{
