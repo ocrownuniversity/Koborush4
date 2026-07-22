@@ -2423,7 +2423,6 @@ window.handleGoogleAuth=async(retry)=>{
   if(window._gAuthBusy)return; // ignore double-taps while a request is already in flight
   window._gAuthBusy=true;
   _setGBtnBusy(true);
-  if(!retry)showToast('info','Connecting to Google…');
   const timeoutMs=20000;
   let timedOut=false;
   const timeoutId=setTimeout(()=>{timedOut=true;window._gAuthBusy=false;_setGBtnBusy(false);showToast('error','Google sign-in timed out — your connection may be too slow or unstable right now. Please try again.');},timeoutMs);
@@ -2484,7 +2483,6 @@ window.handleGoogleAuth=async(retry)=>{
     // to Google's servers. Auto-retry once before bothering the user.
     if(!retry&&/network|fetch|timeout/i.test(e.message||'')){
       window._gAuthBusy=false;_setGBtnBusy(false);
-      showToast('info','Connection dropped, retrying…');
       setTimeout(()=>window.handleGoogleAuth(true),1200);
       return;
     }
