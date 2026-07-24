@@ -944,9 +944,10 @@ textarea.form-input{resize:none}
     <!-- STEP 1: Enter Amount + Method -->
     <div id="fundStep1">
       <!-- Payment method tabs -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
         <button id="tabPaystack" onclick="switchFundTab('paystack')" style="background:var(--primary);color:white;border:none;border-radius:11px;padding:11px 6px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">💳 Card</button>
         <button id="tabDVA" onclick="switchFundTab('dva')" style="background:white;color:var(--text);border:2px solid var(--border);border-radius:11px;padding:11px 6px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">🔁 Bank Transfer</button>
+        <button id="tabManual" onclick="switchFundTab('manual')" style="background:white;color:var(--text);border:2px solid var(--border);border-radius:11px;padding:11px 6px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">🧾 Manual</button>
       </div>
 
       <!-- Paystack tab content -->
@@ -999,6 +1000,21 @@ textarea.form-input{resize:none}
             <button class="btn btn-primary" onclick="checkDVAPayment()" id="checkDVABtn">🔄 I've Sent Money – Check Now</button>
             <p style="font-size:11px;color:var(--text3);margin-top:10px;text-align:center;line-height:1.5">Payments are usually detected within seconds. If your balance doesn't update immediately, tap the button above.</p>
           </div>
+        </div>
+      </div>
+
+      <!-- Manual bank transfer + receipt upload tab content -->
+      <div id="fundTabManual" style="display:none">
+        <div class="fund-panel">
+          <div class="fund-panel-title"><div class="step-badge">1</div>Manual Bank Transfer</div>
+          <div style="background:#EEF2FF;border-radius:10px;padding:10px 12px;margin-bottom:13px;display:flex;gap:8px">
+            <span style="font-size:16px">🧾</span>
+            <p style="font-size:11px;color:#3730A3;line-height:1.5">Transfer to our company account, then upload your receipt for admin review. Usually approved within 5–30 minutes.</p>
+          </div>
+          <div class="form-group"><label class="form-label">Amount (₦)</label><input type="number" class="form-input" id="fundAmount" placeholder="Enter amount e.g. 5000"></div>
+          <div class="form-group"><label class="form-label">Your Name (as it appears on the transfer)</label><input type="text" class="form-input" id="fundSenderName" placeholder="e.g. John Doe"></div>
+          <div class="form-group"><label class="form-label">Note (optional)</label><input type="text" class="form-input" id="fundNote" placeholder="Any extra info for admin"></div>
+          <button class="btn btn-primary" onclick="goToFundStep2()">Continue →</button>
         </div>
       </div>
     </div>
@@ -2221,6 +2237,22 @@ import{getStorage as fbStorage,ref as storageRef,uploadString,getDownloadURL}fro
 
 const FC={apiKey:"AIzaSyBPssL1UIKWUgrFZIHqR8cCdOaFabK23hY",authDomain:"koborush-a9777.firebaseapp.com",projectId:"koborush-a9777",storageBucket:"koborush-a9777.firebasestorage.app",messagingSenderId:"377849970905",appId:"1:377849970905:web:645f35e338375c7b3bfec8"};
 const GOOGLE_CLIENT_ID='377849970905-51lovsjvqe6vrs2fdb760ncdk97sm98l.apps.googleusercontent.com';
+// TODO: replace with your deployed Cloud Function URL (see deployment steps).
+const PAYSTACK_FN_URL='https://REGION-koborush-a9777.cloudfunctions.net/paystack';
+// Calls the server-side Paystack proxy — the Paystack secret key never
+// touches the browser. Throws with a friendly message on any failure.
+async function callPaystackFn(action, payload){
+  if(!_s.user)throw new Error('Please log in again');
+  const idToken=await _s.user.getIdToken();
+  const r=await fetch(PAYSTACK_FN_URL,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+idToken},
+    body:JSON.stringify({action,...payload})
+  });
+  const j=await r.json();
+  if(!j.ok)throw new Error(j.error||'Something went wrong');
+  return j;
+}
 const app=initializeApp(FC);
 const auth=getAuth(app);
 // ── SESSION SECURITY: force session-only persistence (no auto login after browser close) ──
@@ -3162,17 +3194,13 @@ function _addPendingPaystack(entry){
 function _removePendingPaystack(reference){
   _savePendingPaystack(_getPendingPaystack().filter(x=>x.reference!==reference));
 }
-// Credits a confirmed Paystack payment. Idempotent — uses the Paystack
-// reference as the transaction document ID, so retrying (automatically or
-// manually) can never double-credit the same payment.
+// Credits a confirmed Paystack payment. The server independently verifies
+// the transaction with Paystack and is idempotent (a reference can only
+// ever be credited once), so this can never be used to fake-fund a wallet.
 async function creditPaystackPayment(uid, reference, amount){
-  const txDocId='paystack_'+reference;
-  const txDocRef=doc(db,'transactions',txDocId);
-  const existing=await getDoc(txDocRef);
-  if(existing.exists()){ _removePendingPaystack(reference); return {alreadyCredited:true}; }
-  await updateDoc(doc(db,'users',uid),{balance:increment(amount),totalFunded:increment(amount)});
-  await setDoc(txDocRef,{id:txDocId,userId:uid,type:'fund_approved',status:'success',amount,description:'Wallet Funded via Paystack',reference,createdAt:serverTimestamp()});
-  addNotif(uid,'✅ Wallet Funded!','₦'+amount.toLocaleString()+' via Paystack','success').catch(()=>{});
+  const res=await callPaystackFn('verifyTransaction',{reference});
+  if(res.alreadyCredited){ _removePendingPaystack(reference); return {alreadyCredited:true}; }
+  addNotif(uid,'✅ Wallet Funded!','₦'+res.amount.toLocaleString()+' via Paystack','success').catch(()=>{});
   _removePendingPaystack(reference);
   return {alreadyCredited:false};
 }
@@ -5019,23 +5047,15 @@ window.lookupBankAcct=()=>{
   if(_bankLookupTimer)clearTimeout(_bankLookupTimer);
   _bankLookupTimer=setTimeout(async()=>{
     try{
-      const sec=await _getPaystackSecret();
-      if(!sec)throw new Error('Paystack not configured');
-      const r=await fetch(`https://api.paystack.co/bank/resolve?account_number=${acct}&bank_code=${bankCode}`,{headers:{'Authorization':'Bearer '+sec}});
-      const j=await r.json();
-      if(j.status&&j.data?.account_name){
-        val.textContent=j.data.account_name;
-        if(hidden)hidden.value=j.data.account_name;
-        box.style.display='block';
-        err.style.display='none';
-      } else {
-        box.style.display='none';
-        err.style.display='block';
-        err.textContent=j.message||'Account not found';
-      }
+      const j=await callPaystackFn('resolveAccount',{account_number:acct,bank_code:bankCode});
+      val.textContent=j.account_name;
+      if(hidden)hidden.value=j.account_name;
+      box.style.display='block';
+      err.style.display='none';
     }catch(e){
-      if(box)box.style.display='none';
-      if(err){err.style.display='block';err.textContent='Lookup failed. Check Paystack key in admin.';}
+      box.style.display='none';
+      err.style.display='block';
+      err.textContent=e.message||'Account not found';
     }
   },800);
 };
@@ -5260,15 +5280,8 @@ window.showWithdrawSheet=async()=>{
   // Load Nigerian banks from Paystack
   let bankOptions='<option value="">Select bank...</option>';
   try{
-    const sec=await _getPaystackSecret();
-    if(sec){
-      const r=await fetch('https://api.paystack.co/bank?currency=NGN&perPage=100',{headers:{'Authorization':'Bearer '+sec}});
-      const j=await r.json();
-      if(j.status&&j.data){
-        bankOptions=j.data.map(b=>`<option value="${b.code}" data-name="${b.name}">${b.name}</option>`).join('');
-        bankOptions='<option value="">Select bank...</option>'+bankOptions;
-      }
-    }
+    const j=await callPaystackFn('listBanks',{});
+    bankOptions='<option value="">Select bank...</option>'+j.banks.map(b=>`<option value="${b.code}" data-name="${b.name}">${b.name}</option>`).join('');
   }catch(e){
     // Fallback to common banks
     bankOptions=`<option value="">Select bank...</option>
@@ -5324,52 +5337,29 @@ window.wdLookupAcct=()=>{
   const nameBox=document.getElementById('wdNameBox');
   const nameVal=document.getElementById('wdNameVal');
   const nameErr=document.getElementById('wdNameErr');
-  const rcEl=document.getElementById('wdRecipientCode');
   if(nameBox)nameBox.style.display='none';
   if(nameErr)nameErr.style.display='none';
-  if(rcEl)rcEl.textContent='';
   if(acct.length!==10||!bankCode)return;
   if(nameVal)nameVal.textContent='Verifying...';
   if(nameBox)nameBox.style.display='block';
   if(_wdLookupTimer)clearTimeout(_wdLookupTimer);
   _wdLookupTimer=setTimeout(async()=>{
+    // Just a preview here for the user's confidence — the server
+    // re-resolves the account itself (and creates the transfer recipient)
+    // when the withdrawal is actually submitted, so this preview can't be
+    // tampered with to redirect real money elsewhere.
     try{
-      const sec=await _getPaystackSecret();
-      if(!sec)throw new Error('Paystack not configured');
-      const r=await fetch(`https://api.paystack.co/bank/resolve?account_number=${acct}&bank_code=${bankCode}`,{headers:{'Authorization':'Bearer '+sec}});
-      const j=await r.json();
-      if(j.status&&j.data?.account_name){
-        nameVal.textContent=j.data.account_name;
-        nameBox.style.display='block';
-        nameErr.style.display='none';
-        // Create transfer recipient immediately
-        const rr=await fetch('https://api.paystack.co/transferrecipient',{
-          method:'POST',headers:{'Authorization':'Bearer '+sec,'Content-Type':'application/json'},
-          body:JSON.stringify({type:'nuban',name:j.data.account_name,account_number:acct,bank_code:bankCode,currency:'NGN'})
-        });
-        const rj=await rr.json();
-        if(rj.status&&rj.data?.recipient_code){
-          rcEl.textContent=rj.data.recipient_code;
-        }
-      } else {
-        nameBox.style.display='none';
-        nameErr.style.display='block';
-        nameErr.textContent=j.message||'Account not found';
-      }
+      const j=await callPaystackFn('resolveAccount',{account_number:acct,bank_code:bankCode});
+      nameVal.textContent=j.account_name;
+      nameBox.style.display='block';
+      nameErr.style.display='none';
     }catch(e){
-      if(nameBox)nameBox.style.display='none';
-      if(nameErr){nameErr.style.display='block';nameErr.textContent='Verification failed: '+e.message;}
+      nameBox.style.display='none';
+      nameErr.style.display='block';
+      nameErr.textContent=e.message||'Account not found';
     }
   },800);
 };
-// Helper: get Paystack secret from Firestore settings
-async function _getPaystackSecret(){
-  try{
-    const snap=await getDoc(doc(db,'settings','apis'));
-    if(snap.exists()){const a=snap.data();return a.paystackSec||a.paystackSecret||'';}
-  }catch(e){}
-  return '';
-}
 
 window.submitWithdrawal=async()=>{
   const am=parseFloat(document.getElementById('wdAmt')?.value)||0;
@@ -5377,98 +5367,55 @@ window.submitWithdrawal=async()=>{
   const bankName=document.getElementById('wdBank')?.selectedOptions[0]?.dataset?.name||document.getElementById('wdBank')?.selectedOptions[0]?.text||'';
   const ac=document.getElementById('wdAcct')?.value||'';
   const nm=document.getElementById('wdNameVal')?.textContent||'';
-  const rc=document.getElementById('wdRecipientCode')?.textContent||'';
-  const total=am+50; // ₦50 fee
+  const total=am+50; // \u20a650 fee
 
   if(!bankCode)return showToast('error','Select a bank');
   if(ac.length!==10)return showToast('error','Enter a valid 10-digit account number');
-  if(!nm||nm==='—'||nm==='Verifying...')return showToast('error','Wait for account verification');
-  if(am<500)return showToast('error','Minimum withdrawal is ₦500');
-  if(total>(_s.userData?.balance||0))return showToast('error','Insufficient balance (including ₦50 fee)');
-  if(!rc)return showToast('error','Account not verified yet. Wait a moment.');
+  if(!nm||nm==='\u2014'||nm==='Verifying...')return showToast('error','Wait for account verification');
+  if(am<500)return showToast('error','Minimum withdrawal is \u20a6500');
+  if(total>(_s.userData?.balance||0))return showToast('error','Insufficient balance (including \u20a650 fee)');
+
+  closeOverlay();
+  showToast('info','Processing withdrawal...');
 
   try{
-    const sec=await _getPaystackSecret();
-    if(!sec)return showToast('error','Paystack not configured. Contact admin.');
+    // The server independently resolves the account, creates the transfer
+    // recipient, checks + deducts the balance atomically, and performs the
+    // transfer — none of that trusts anything the browser sends except the
+    // amount/account number/bank code.
+    const res=await callPaystackFn('initiateWithdrawal',{amount:am,account_number:ac,bank_code:bankCode,bank_name:bankName});
+    await loadUD(_s.user.uid);
+    const _rs=csym(_s.userData?.country);
+    const accountName=res.accountName||nm;
 
-    closeOverlay();
-    showToast('info','Processing withdrawal...');
-
-    // Deduct from user wallet first (atomically)
-    const tid=genId(12);
-    await runTransaction(db,async(t)=>{
-      const uRef=doc(db,'users',_s.user.uid);
-      const us=await t.get(uRef);
-      const bal=us.data().balance;
-      if(bal<total)throw new Error('Insufficient balance');
-      t.update(uRef,{balance:increment(-total),totalSpent:increment(total)});
-      t.set(doc(db,'transactions',tid),{
-        id:tid,userId:_s.user.uid,type:'withdrawal',status:'processing',
-        amount:total,sendAmount:am,fee:50,
-        bank:bankName,accountNumber:ac,accountName:nm,
-        recipientCode:rc,description:`Withdrawal to ${nm} – ${bankName}`,
-        balanceBefore:bal,balanceAfter:bal-total,createdAt:serverTimestamp()
-      });
-    });
-
-    // Initiate Paystack transfer
-    const ref='KBR-WD-'+tid;
-    const tr=await fetch('https://api.paystack.co/transfer',{
-      method:'POST',
-      headers:{'Authorization':'Bearer '+sec,'Content-Type':'application/json'},
-      body:JSON.stringify({source:'balance',amount:Math.round(am*100),recipient:rc,reason:'KOBOrush Withdrawal – '+nm,reference:ref})
-    });
-    const tj=await tr.json();
-
-    if(tj.status&&tj.data?.status==='success'){
-      // Genuinely completed — money has left Paystack's balance to the bank
-      await updateDoc(doc(db,'transactions',tid),{
-        status:'success',
-        paystackRef:tj.data.reference||ref,
-        transferCode:tj.data.transfer_code||''
-      });
-      await addNotif(_s.user.uid,'💸 Withdrawal Successful',
-        `₦${am.toLocaleString()} sent to ${nm} (${bankName}). Ref: ${ref}`,'success');
+    if(res.outcome==='success'){
+      await addNotif(_s.user.uid,'\ud83d\udcb8 Withdrawal Successful',
+        `\u20a6${am.toLocaleString()} sent to ${accountName} (${bankName}). Ref: ${res.reference}`,'success');
       navigateTo('successScreen');
       document.getElementById('successTitle').textContent='Withdrawal Successful!';
       document.getElementById('successMsg').textContent='Money sent successfully!';
-      const _rs=csym(_s.userData?.country);
       document.getElementById('successReceipt').innerHTML=[
-        {l:'To',v:nm},{l:'Bank',v:bankName},{l:'Account',v:ac},
+        {l:'To',v:accountName},{l:'Bank',v:bankName},{l:'Account',v:ac},
         {l:'Amount',v:fmt(am,_rs)},{l:'Fee',v:fmt(50,_rs)},{l:'Total Deducted',v:fmt(total,_rs)},
-        {l:'Status',v:'✅ Sent'},
-        {l:'Reference',v:ref},{l:'Date',v:new Date().toLocaleString()}
+        {l:'Status',v:'\u2705 Sent'},
+        {l:'Reference',v:res.reference},{l:'Date',v:new Date().toLocaleString()}
       ].map(i=>`<div class="receipt-row"><span class="r-label">${i.l}</span><span class="r-val">${i.v}</span></div>`).join('');
-    } else if(tj.status&&tj.data?.status==='pending'){
-      // NOT confirmed yet — Paystack may be holding this for OTP verification.
-      // Do NOT declare success. Wallet stays debited (funds are held at
-      // Paystack, not lost) but the user is told the truth: it's not
-      // finished, and staff can see it flagged "pending" under Admin → Transactions.
-      await updateDoc(doc(db,'transactions',tid),{
-        status:'pending',
-        paystackRef:tj.data.reference||ref,
-        transferCode:tj.data.transfer_code||''
-      });
-      await addNotif(_s.user.uid,'⏳ Withdrawal Processing',
-        `₦${am.toLocaleString()} to ${nm} (${bankName}) is being processed. Ref: ${ref}`,'info');
+    } else if(res.outcome==='pending'){
+      await addNotif(_s.user.uid,'\u23f3 Withdrawal Processing',
+        `\u20a6${am.toLocaleString()} to ${accountName} (${bankName}) is being processed. Ref: ${res.reference}`,'info');
       navigateTo('successScreen');
       document.getElementById('successTitle').textContent='Withdrawal Processing';
       document.getElementById('successTitle').style.color='#B45309';
-      document.getElementById('successMsg').textContent='Your transfer is being confirmed. This can occasionally take a while — you\'ll be notified once it completes.';
-      const _rs=csym(_s.userData?.country);
+      document.getElementById('successMsg').textContent='Your transfer is being confirmed. This can occasionally take a while \u2014 you\'ll be notified once it completes.';
       document.getElementById('successReceipt').innerHTML=[
-        {l:'To',v:nm},{l:'Bank',v:bankName},{l:'Account',v:ac},
+        {l:'To',v:accountName},{l:'Bank',v:bankName},{l:'Account',v:ac},
         {l:'Amount',v:fmt(am,_rs)},{l:'Fee',v:fmt(50,_rs)},{l:'Total Deducted',v:fmt(total,_rs)},
-        {l:'Status',v:'⏳ Processing — not yet confirmed'},
-        {l:'Reference',v:ref},{l:'Date',v:new Date().toLocaleString()}
+        {l:'Status',v:'\u23f3 Processing \u2014 not yet confirmed'},
+        {l:'Reference',v:res.reference},{l:'Date',v:new Date().toLocaleString()}
       ].map(i=>`<div class="receipt-row"><span class="r-label">${i.l}</span><span class="r-val">${i.v}</span></div>`).join('');
-    } else {
-      // Transfer failed — refund user
-      await updateDoc(doc(db,'users',_s.user.uid),{balance:increment(total)});
-      await updateDoc(doc(db,'transactions',tid),{status:'failed',failReason:tj.message||'Paystack error'});
-      showToast('error','Transfer failed: '+(tj.message||'Please try again'));
     }
   }catch(e){
+    // Server already refunds automatically on a failed transfer.
     showToast('error',e.message||'Withdrawal failed');
     console.error('Withdrawal error:',e);
   }
@@ -7561,8 +7508,8 @@ async function addNotif(uid, title, message, type='info'){
 
 // ── switchFundTab: toggle Card / Bank Transfer tabs ──
 window.switchFundTab=(tab)=>{
-  const panels = {paystack:'fundTabPaystack', dva:'fundTabDVA'};
-  const btns   = {paystack:'tabPaystack', dva:'tabDVA'};
+  const panels = {paystack:'fundTabPaystack', dva:'fundTabDVA', manual:'fundTabManual'};
+  const btns   = {paystack:'tabPaystack', dva:'tabDVA', manual:'tabManual'};
   Object.keys(panels).forEach(k=>{
     const p=document.getElementById(panels[k]); if(p) p.style.display = (k===tab)?'block':'none';
     const b=document.getElementById(btns[k]);
@@ -7574,6 +7521,7 @@ window.switchFundTab=(tab)=>{
   });
   if(tab==='paystack') checkPaystackKey();
   if(tab==='dva') loadDVAUI();
+  if(tab==='manual') loadCompanyAcct();
 };
 
 // ── Dedicated Virtual Account (auto bank-transfer funding via Paystack) ──
@@ -7600,40 +7548,13 @@ window.generateDedicatedAccount=async()=>{
   const btn=document.getElementById('genDVABtn');
   if(btn){btn.disabled=true;btn.innerHTML='<span class="btn-spinner"></span> Generating...';}
   try{
-    const sec=await _getPaystackSecret();
-    if(!sec)throw new Error('Paystack not configured. Contact admin.');
-    const d=_s.userData;
-    // 1. Create (or reuse) a Paystack customer for this user
-    const custRes=await fetch('https://api.paystack.co/customer',{
-      method:'POST',
-      headers:{'Authorization':'Bearer '+sec,'Content-Type':'application/json'},
-      body:JSON.stringify({email:d.email,first_name:d.firstName,last_name:d.lastName,phone:d.phone||''})
-    });
-    const custJson=await custRes.json();
-    if(!custJson.status)throw new Error(custJson.message||'Could not create customer profile');
-    const customerCode=custJson.data.customer_code;
-    // 2. Create the dedicated virtual account for that customer
-    const dvaRes=await fetch('https://api.paystack.co/dedicated_account',{
-      method:'POST',
-      headers:{'Authorization':'Bearer '+sec,'Content-Type':'application/json'},
-      body:JSON.stringify({customer:customerCode,preferred_bank:'wema-bank'})
-    });
-    const dvaJson=await dvaRes.json();
-    if(!dvaJson.status)throw new Error(dvaJson.message||'Could not generate account number. Your Paystack account may need to enable Dedicated Virtual Accounts.');
-    const acct=dvaJson.data;
-    await updateDoc(doc(db,'users',_s.user.uid),{
-      dvaAccountNumber:acct.account_number,
-      dvaBankName:acct.bank?.name||'Wema Bank',
-      dvaAccountName:acct.account_name,
-      dvaCustomerCode:customerCode,
-      dvaAccountId:acct.id
-    });
+    const acct=await callPaystackFn('createCustomerAndDVA',{});
     if(_s.userData){
-      _s.userData.dvaAccountNumber=acct.account_number;
-      _s.userData.dvaBankName=acct.bank?.name||'Wema Bank';
-      _s.userData.dvaAccountName=acct.account_name;
-      _s.userData.dvaCustomerCode=customerCode;
-      _s.userData.dvaAccountId=acct.id;
+      _s.userData.dvaAccountNumber=acct.dvaAccountNumber;
+      _s.userData.dvaBankName=acct.dvaBankName;
+      _s.userData.dvaAccountName=acct.dvaAccountName;
+      _s.userData.dvaCustomerCode=acct.dvaCustomerCode;
+      _s.userData.dvaAccountId=acct.dvaAccountId;
     }
     showToast('success','Account number generated!');
     loadDVAUI();
@@ -7648,28 +7569,15 @@ window.checkDVAPayment=async()=>{
   if(!customerCode)return showToast('error','No dedicated account found');
   if(btn){btn.disabled=true;btn.innerHTML='<span class="btn-spinner"></span> Checking...';}
   try{
-    const sec=await _getPaystackSecret();
-    if(!sec)throw new Error('Paystack not configured');
-    const r=await fetch(`https://api.paystack.co/transaction?customer=${customerCode}&status=success&perPage=20`,{headers:{'Authorization':'Bearer '+sec}});
-    const j=await r.json();
-    if(!j.status)throw new Error(j.message||'Could not check transactions');
-    const txs=(j.data||[]).filter(t=>t.channel==='dedicated_nuban');
-    if(!txs.length){showToast('info','No new payment found yet. Try again in a moment.');if(btn){btn.disabled=false;btn.innerHTML='🔄 I\'ve Sent Money – Check Now';}return;}
-    let creditedAny=false;
-    for(const t of txs){
-      const txDocId='dva_'+t.id;
-      const existing=await getDoc(doc(db,'transactions',txDocId));
-      if(existing.exists())continue; // already credited
-      const amount=t.amount/100;
-      await setDoc(doc(db,'transactions',txDocId),{id:txDocId,userId:_s.user.uid,type:'fund_approved',status:'success',amount,description:'Wallet Funded via Bank Transfer (Dedicated Account)',reference:t.reference,createdAt:serverTimestamp()});
-      await updateDoc(doc(db,'users',_s.user.uid),{balance:increment(amount),totalFunded:increment(amount)});
-      addNotif(_s.user.uid,'✅ Wallet Funded!','₦'+amount.toLocaleString()+' via Bank Transfer','success').catch(()=>{});
-      creditedAny=true;
+    const res=await callPaystackFn('checkDVATransactions',{});
+    if(!res.creditedAny){showToast('info','No new payment to credit \u2014 it may already be added, or try again in a moment.');}
+    else{
+      await loadUD(_s.user.uid);
+      showToast('success','Payment confirmed! Wallet credited.');
+      navigateTo('home');
     }
-    if(creditedAny){showToast('success','Payment confirmed! Wallet credited.');navigateTo('home');}
-    else{showToast('info','No new payment to credit — it may already be added.');}
   }catch(e){showToast('error',e.message);}
-  finally{if(btn){btn.disabled=false;btn.innerHTML='🔄 I\'ve Sent Money – Check Now';}}
+  finally{if(btn){btn.disabled=false;btn.innerHTML='\ud83d\udd04 I\'ve Sent Money \u2013 Check Now';}}
 };
 
 
