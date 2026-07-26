@@ -2286,8 +2286,8 @@ window.addEventListener('beforeunload',()=>{
 
 const db=getFirestore(app);
 const storage=fbStorage(app);
-const ADMIN='oladejiridwanopeyemi@gmail.com';
-function isAdminEmail(e){return(e||'').trim().toLowerCase()===ADMIN.toLowerCase();}
+const ADMIN=['oladejiridwanopeyemi@gmail.com','koborush26@gmail.com'];
+function isAdminEmail(e){const n=(e||'').trim().toLowerCase();return ADMIN.some(a=>a.toLowerCase()===n);}
 
 window._s={user:null,userData:null,isAdmin:false,balHidden:false,navHist:[],pendingData:null,selProv:{},selPlan:null,allTx:[],allUsers:[],allFundReqs:[],proofFile:null,proofDataURL:null,fundStep:1,adminPINVerified:false};
 
